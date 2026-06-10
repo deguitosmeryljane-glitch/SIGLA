@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>SIGLA - Smart Suspension Information Gateway</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.7.14/dist/vue.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        .low-bandwidth * { animation: none !important; transition: none !important; }
+        .card-hover:hover { transform: translateY(-2px); transition: 0.2s; }
+    </style>
+</head>
+<body class="bg-gray-50">
+<div id="app" class="min-h-screen flex flex-col">
+    <!-- Navbar -->
+    <nav class="bg-blue-800 text-white shadow-md sticky top-0 z-20">
+        <div class="container mx-auto px-4 py-3 flex flex-wrap justify-between items-center">
+            <div class="flex items-center space-x-2">
+                <i class="fas fa-shield-alt text-2xl"></i>
+                <span class="font-bold text-xl">SIGLA</span>
+                <span class="text-xs bg-blue-600 px-2 py-0.5 rounded-full">Kabankalan City</span>
+            </div>
+            <div>
+                <button @click="toggleLowBandwidth" class="px-3 py-1 rounded text-sm" :class="lowBandwidth ? 'bg-yellow-600' : 'bg-blue-700'">
+                    <i class="fas fa-tachometer-alt"></i> {{ lowBandwidth ? 'Low-BW ON' : 'Normal' }}
+                </button>
+                <button @click="showRoleModal = true" class="ml-2 bg-green-700 px-3 py-1 rounded text-sm">Login</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mx-auto px-4 py-6 flex-grow">
+        <!-- Public View -->
+        <div v-if="currentView === 'public'">
+            <div class="flex flex-wrap justify-between items-center mb-4">
+                <h1 class="text-2xl font-bold"><i class="fas fa-bullhorn text-blue-600"></i> Live Advisories</h1>
+                <select v-model="schoolTypeFilter" class="border rounded p-2">
+                    <option value="all">All Institutions</option>
+                    <option value="public">Public Schools</option>
+                    <option value="private">Private Schools</option>
+                </select>
+            </div>
+            <div v-if="!online" class="bg-yellow-100 p-3 mb-4 rounded">⚠️ Offline mode – showing cached data.</div>
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+                <div v-for="adv in filteredAdvisories" :key="adv.uuid" class="bg-white rounded-xl shadow-md border-l-4" :class="adv.severity === 'Extreme Danger' ? 'border-red-600' : 'border-blue-500'">
+                    <div class="p-5">
+                        <span class="text-xs px-2 py-1 rounded-full" :class="adv.type === 'Heat Index' ? 'bg-red-100' : 'bg-blue-100'">{{ adv.type }}</span>
+                        <span class="ml-2 text-xs bg-gray-100 px-2 rounded">{{ adv.target_audience === 'public' ? 'Public' : 'Private' }}</span>
+                        <h2 class="text-xl font-bold mt-2">{{ adv.title }}</h2>
+                        <p class="text-gray-600 text-sm">{{ adv.effective_date }} | {{ adv.time }}</p>
+                        <p class="mt-2">{{ adv.summary }}</p>
+                        <div v-if="adv.heat_index_value" class="mt-2 bg-red-50 p-2 rounded text-sm">🌡️ Heat Index: {{ adv.heat_index_value }}°C – {{ adv.severity }}</div>
+                        <div class="mt-2 text-sm font-medium text-purple-600">{{ adv.action_mode }}</div>
+                        <div class="mt-3 text-xs text-gray-400">Issued by: {{ adv.authority }}</div>
+                    </div>
+                </div>
+                <div v-if="filteredAdvisories.length === 0" class="col-span-full text-center p-10 bg-white rounded shadow">No active advisories.</div>
+            </div>
+        </div>
+
+        <!-- Admin Dashboard -->
+        <div v-if="currentView === 'admin'">
+            <div class="flex justify-between items-center mb-4">
+                <h1 class="text-2xl font-bold"><i class="fas fa-gavel"></i> LGU / DepEd Control Panel</h1>
+                <button @click="logout" class="bg-red-600 text-white px-3 py-1 rounded">Logout</button>
+            </div>
+            <!-- OCR Upload -->
+            <div class="bg-white p-5 rounded-xl shadow mb-6">
+                <h2 class="font-bold text-lg">📄 Upload Memorandum (OCR + AI)</h2>
+                <input type="file" @change="handleFileUpload" accept="image/*,application/pdf" class="my-2">
+                <div v-if="ocrProgress" class="bg-gray-200 rounded h-2 w-full"><div class="bg-blue-500 h-2 rounded" :style="{width: ocrProgress+'%'}"></div></div>
+                <div v-if="extractedPreview" class="mt-4 border p-3 rounded bg-gray-50">
+                    <pre class="text-xs">{{ JSON.stringify(extractedPreview, null, 2) }}</pre>
+                    <button @click="publishAdvisory(extractedPreview)" class="mt-2 bg-green-600 text-white px-4 py-1 rounded">Publish Advisory</button>
+                </div>
+            </div>
+            <!-- Manual Form -->
+            <div class="bg-white p-5 rounded-xl shadow mb-6">
+                <h2 class="font-bold">✍️ Manual Advisory</h2>
+                <div class="grid md:grid-cols-2 gap-3">
+                    <input v-model="manual.title" placeholder="Title" class="border p-2 rounded">
+                    <select v-model="manual.type" class="border p-2 rounded"><option>Heat Index</option><option>Flood/Typhoon</option></select>
+                    <input v-model="manual.effective_date" type="date" class="border p-2 rounded">
+                    <input v-model="manual.heat_index" placeholder="Heat Index °C" class="border p-2 rounded">
+                    <textarea v-model="manual.summary" placeholder="Summary" rows="2" class="border p-2 rounded col-span-2"></textarea>
+                    <select v-model="manual.target_audience" class="border p-2 rounded"><option value="public">Public</option><option value="private">Private</option></select>
+                    <select v-model="manual.action_mode" class="border p-2 rounded"><option>Suspension (No classes)</option><option>Shift to Asynchronous</option></select>
+                    <button @click="createManualAdvisory" class="bg-indigo-600 text-white p-2 rounded col-span-2">Create</button>
+                </div>
+            </div>
+            <!-- Subscribers & SMS -->
+            <div class="bg-white p-5 rounded-xl shadow">
+                <h2 class="font-bold">📞 Subscribers & SMS Fallback</h2>
+                <input type="file" @change="uploadCSV" accept=".csv" class="my-2">
+                <button @click="broadcastSMS" class="bg-yellow-600 text-white px-3 py-1 rounded">Simulate SMS Broadcast</button>
+                <p class="text-sm text-green-600 mt-2">{{ smsStatus }}</p>
+            </div>
+        </div>
+
+        <!-- Private School Admin -->
+        <div v-if="currentView === 'privateAdmin'">
+            <div class="flex justify-between items-center mb-4">
+                <h1 class="text-2xl font-bold">🏫 Private School Dashboard</h1>
+                <button @click="logout" class="bg-red-600 text-white px-3 py-1 rounded">Logout</button>
+            </div>
+            <div class="bg-white p-5 rounded-xl shadow">
+                <h2 class="font-bold">Pending Verifications</h2>
+                <div v-for="adv in pendingPrivate" :key="adv.uuid" class="border p-3 my-2 rounded bg-yellow-50">
+                    <p><strong>{{ adv.title }}</strong> – {{ adv.summary }}</p>
+                    <button @click="confirmAdvisory(adv.uuid)" class="bg-green-600 text-white px-3 py-1 rounded mt-2">Confirm Suspension/Shift</button>
+                </div>
+                <div v-if="pendingPrivate.length === 0" class="text-gray-500">No pending advisories.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Role Modal -->
+    <div v-if="showRoleModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-30">
+        <div class="bg-white p-6 rounded-xl w-96">
+            <h2 class="text-xl font-bold mb-3">Access Portal</h2>
+            <button @click="loginAs('admin')" class="w-full bg-blue-700 text-white py-2 rounded mb-2">🏛️ LGU / DepEd Admin</button>
+            <button @click="loginAs('privateAdmin')" class="w-full bg-purple-700 text-white py-2 rounded mb-2">🏫 Private School Admin</button>
+            <button @click="showRoleModal=false" class="w-full border py-2 rounded">🔍 Back to Public View</button>
+        </div>
+    </div>
+
+    <footer class="bg-gray-800 text-white text-center py-3 text-sm">SIGLA – Offline-first | OCR+AI | Kabankalan City</footer>
+</div>
+
+<script>
+// Vue App
+new Vue({
+    el: '#app',
+    data: {
+        currentView: 'public',
+        authRole: null,
+        showRoleModal: false,
+        lowBandwidth: localStorage.getItem('lowBandwidth') === 'true',
+        online: navigator.onLine,
+        schoolTypeFilter: 'all',
+        advisories: [],
+        subscribers: [],
+        smsStatus: '',
+        ocrProgress: 0,
+        extractedPreview: null,
+        manual: { title: '', type: 'Heat Index', effective_date: new Date().toISOString().slice(0,10), heat_index: '', summary: '', target_audience: 'public', action_mode: 'Suspension (No classes)' }
+    },
+    computed: {
+        filteredAdvisories() {
+            let active = this.advisories.filter(a => a.status === 'active' || (a.target_audience === 'private' && a.private_confirmed == 1));
+            if (this.schoolTypeFilter === 'public') return active.filter(a => a.target_audience === 'public');
+            if (this.schoolTypeFilter === 'private') return active.filter(a => a.target_audience === 'private');
+            return active;
+        },
+        pendingPrivate() {
+            return this.advisories.filter(a => a.target_audience === 'private' && a.status === 'pending' && a.private_confirmed == 0);
+        }
+    },
+    async mounted() {
+        await this.fetchAdvisories();
+        await this.fetchSubscribers();
+        window.addEventListener('online', () => { this.online = true; this.fetchAdvisories(); });
+        window.addEventListener('offline', () => this.online = false);
+        if (this.lowBandwidth) document.body.classList.add('low-bandwidth');
+    },
+    methods: {
+        toggleLowBandwidth() {
+            this.lowBandwidth = !this.lowBandwidth;
+            localStorage.setItem('lowBandwidth', this.lowBandwidth);
+            document.body.classList.toggle('low-bandwidth', this.lowBandwidth);
+        },
+        async fetchAdvisories() {
+            const res = await fetch('/api.php/advisories');
+            this.advisories = await res.json();
+        },
+        async fetchSubscribers() {
+            const res = await fetch('/api.php/subscribers');
+            this.subscribers = await res.json();
+        },
+        async handleFileUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            this.ocrProgress = 10;
+            const worker = await Tesseract.createWorker('eng');
+            await worker.load();
+            await worker.loadLanguage('eng');
+            await worker.initialize('eng');
+            const { data: { text } } = await worker.recognize(file);
+            await worker.terminate();
+            this.ocrProgress = 100;
+            setTimeout(() => this.ocrProgress = 0, 1000);
+            this.extractedPreview = this.simulateAI(text);
+        },
+        simulateAI(rawText) {
+            const lower = rawText.toLowerCase();
+            const type = lower.includes('heat') ? 'Heat Index' : 'Flood/Typhoon';
+            const heatMatch = rawText.match(/(\d{2})\s*°C/);
+            const heatVal = heatMatch ? heatMatch[1] : (type === 'Heat Index' ? '39' : '');
+            const severity = (heatVal && heatVal >= 42) ? 'Extreme Danger' : (heatVal >= 39 ? 'Danger' : 'Caution');
+            const target = lower.includes('private') ? 'private' : 'public';
+            const action = lower.includes('asynchronous') ? 'Shift to Asynchronous' : 'Suspension (No classes)';
+            return {
+                title: `${type} Advisory`,
+                type, effective_date: new Date().toISOString().slice(0,10), time: 'Immediate',
+                summary: rawText.substring(0, 200), target_audience: target, severity,
+                heat_index_value: heatVal, action_mode: action, authority: 'LGU/DepEd', source: 'OCR+AI'
+            };
+        },
+        async publishAdvisory(adv) {
+            const res = await fetch('/api.php/advisories', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(adv)
+            });
+            if (res.ok) {
+                alert('Advisory published!');
+                this.extractedPreview = null;
+                this.fetchAdvisories();
+            }
+        },
+        async createManualAdvisory() {
+            const adv = {
+                title: this.manual.title || 'Manual Advisory',
+                type: this.manual.type,
+                effective_date: this.manual.effective_date,
+                time: 'Immediate',
+                summary: this.manual.summary,
+                target_audience: this.manual.target_audience,
+                severity: this.manual.heat_index >= 42 ? 'Extreme Danger' : 'Danger',
+                heat_index_value: this.manual.heat_index,
+                action_mode: this.manual.action_mode,
+                authority: 'LGU/DepEd',
+                source: 'Manual Entry'
+            };
+            await fetch('/api.php/advisories', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(adv) });
+            alert('Advisory created');
+            this.fetchAdvisories();
+        },
+        async confirmAdvisory(uuid) {
+            await fetch('/api.php/advisories/confirm', {
+                method: 'PUT', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ uuid })
+            });
+            alert('Confirmed');
+            this.fetchAdvisories();
+        },
+        uploadCSV(e) {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = async (ev) => {
+                const lines = ev.target.result.split('\n').slice(1);
+                const subs = lines.filter(l => l.trim()).map(l => {
+                    const [name, school_type, phone, email] = l.split(',');
+                    return { name, school_type, phone, email: email || '' };
+                });
+                await fetch('/api.php/subscribers', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(subs) });
+                alert(`Imported ${subs.length} subscribers`);
+                this.fetchSubscribers();
+            };
+            reader.readAsText(file);
+        },
+        async broadcastSMS() {
+            const res = await fetch('/api.php/sms', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ message: 'SIGLA Alert: New suspension advisory issued.' }) });
+            const data = await res.json();
+            this.smsStatus = `📱 Simulated SMS sent to ${data.recipients} recipients.`;
+            setTimeout(() => this.smsStatus = '', 4000);
+        },
+        loginAs(role) {
+            this.authRole = role;
+            this.currentView = role === 'admin' ? 'admin' : 'privateAdmin';
+            this.showRoleModal = false;
+        },
+        logout() {
+            this.authRole = null;
+            this.currentView = 'public';
+        }
+    }
+});
+</script>
+</body>
+</html>
